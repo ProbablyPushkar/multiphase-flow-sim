@@ -101,14 +101,12 @@ def calculate_pressure_gradient(p, t_f, d_in, rate, api, sg_g, wc, gor):
     return dp_dz_elv + dp_dz_fric, velocity, rho_mix
 
 def get_id_at_depth(depth, casings, tbg_depth, tbg_id):
-    """Determines the internal diameter for flow at a specific depth"""
     if depth <= tbg_depth:
         return tbg_id
     else:
         valid_casings = [c for c in casings if c["depth"] >= depth]
         if valid_casings:
             return min(valid_casings, key=lambda x: x["id"])["id"]
-        # Fallback to open hole or largest casing if below all casing shoes
         return casings[-1]["id"] if casings else tbg_id + 2
 
 def calculate_vlp_curve(p_wh, t_wh, t_bh, md_total, tbg_id, tbg_depth, casings, api, sg_g, wc, gor, rates, n_steps=50):
@@ -145,7 +143,6 @@ with st.sidebar.expander("1. Wellbore Geometry", expanded=True):
     casings = []
     for i in range(int(num_casings)):
         col1, col2 = st.columns(2)
-        # Default wider and shallower for top casings
         c_id = col1.number_input(f"Casing {i+1} ID (in)", value=float(12.0 - i*3.5), step=0.1, key=f"c_id_{i}")
         c_depth = col2.number_input(f"Csg {i+1} Depth (ft)", value=float(2000.0 + i*6000.0), step=500.0, key=f"c_dp_{i}")
         casings.append({"id": c_id, "depth": c_depth})
@@ -175,29 +172,30 @@ with st.sidebar.expander("3. Fluids & Surface", expanded=True):
     gor = st.number_input("Gas-Oil Ratio (scf/STB)", value=800.0, step=100.0)
 
 # ==========================================
-# CALCULATION EXECUTION
+# CALCULATION EXECUTION (ONLY IF PACKER SET)
 # ==========================================
-q_ipr, p_ipr = calculate_ipr(p_res, p_b, pi)
-max_rate = max(q_ipr)
+if has_packer:
+    q_ipr, p_ipr = calculate_ipr(p_res, p_b, pi)
+    max_rate = max(q_ipr)
 
-q_vlp = np.linspace(100, max_rate * 1.2, 20)
-p_vlp = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
+    q_vlp = np.linspace(100, max_rate * 1.2, 20)
+    p_vlp = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
 
-def find_intersection(q_ipr, p_ipr, q_vlp, p_vlp):
-    try:
-        f_ipr = interp1d(q_ipr, p_ipr, kind='cubic', fill_value="extrapolate")
-        f_vlp = interp1d(q_vlp, p_vlp, kind='cubic', fill_value="extrapolate")
-        
-        def diff(q): return f_ipr(q) - f_vlp(q)
-        q_opt = fsolve(diff, max_rate/2)[0]
-        p_opt = f_ipr(q_opt)
-        
-        if 0 <= q_opt <= max_rate:
-            return float(q_opt), float(p_opt)
-    except: pass
-    return None, None
+    def find_intersection(q_ipr, p_ipr, q_vlp, p_vlp):
+        try:
+            f_ipr = interp1d(q_ipr, p_ipr, kind='cubic', fill_value="extrapolate")
+            f_vlp = interp1d(q_vlp, p_vlp, kind='cubic', fill_value="extrapolate")
+            def diff(q): return f_ipr(q) - f_vlp(q)
+            q_opt = fsolve(diff, max_rate/2)[0]
+            p_opt = f_ipr(q_opt)
+            if 0 <= q_opt <= max_rate:
+                return float(q_opt), float(p_opt)
+        except: pass
+        return None, None
 
-q_op, p_op = find_intersection(q_ipr, p_ipr, q_vlp, p_vlp)
+    q_op, p_op = find_intersection(q_ipr, p_ipr, q_vlp, p_vlp)
+else:
+    q_op, p_op, q_ipr, p_ipr, q_vlp, p_vlp = None, None, None, None, None, None
 
 # ==========================================
 # MAIN DASHBOARD TABS
@@ -207,32 +205,34 @@ tab1, tab2, tab3, tab4 = st.tabs(["Nodal Analysis", "Wellbore Schematic", "P/T &
 # --- TAB 1: NODAL ANALYSIS ---
 with tab1:
     st.subheader("System Nodal Analysis")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=q_ipr, y=p_ipr, mode='lines', name='IPR Curve', line=dict(color='blue', width=3)))
-    fig.add_trace(go.Scatter(x=q_vlp, y=p_vlp, mode='lines', name='VLP Curve', line=dict(color='red', width=3)))
-    
-    if q_op and p_op:
-        fig.add_trace(go.Scatter(x=[q_op], y=[p_op], mode='markers', name='Operating Point',
-                                 marker=dict(color='green', size=12, symbol='star')))
-        st.success(f"**Operating Point:** Flow Rate = {q_op:.1f} STB/d  |  Bottomhole Pressure = {p_op:.1f} psi")
+    if not has_packer:
+        st.warning("⚠️ **Calculations Disabled:** Packer is unset. Fluid is entering the annulus. Please set the packer to perform Nodal Analysis.")
     else:
-        st.error("No intersection found. The well cannot flow naturally under these conditions.")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=q_ipr, y=p_ipr, mode='lines', name='IPR Curve', line=dict(color='blue', width=3)))
+        fig.add_trace(go.Scatter(x=q_vlp, y=p_vlp, mode='lines', name='VLP Curve', line=dict(color='red', width=3)))
+        
+        if q_op and p_op:
+            fig.add_trace(go.Scatter(x=[q_op], y=[p_op], mode='markers', name='Operating Point',
+                                     marker=dict(color='green', size=12, symbol='star')))
+            st.success(f"**Operating Point:** Flow Rate = {q_op:.1f} STB/d  |  Bottomhole Pressure = {p_op:.1f} psi")
+        else:
+            st.error("No intersection found. The well cannot flow naturally under these conditions.")
 
-    fig.update_layout(xaxis_title="Flow Rate (STB/d)", yaxis_title="Bottomhole Flowing Pressure (psi)",
-                      hovermode="x unified", template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(xaxis_title="Flow Rate (STB/d)", yaxis_title="Bottomhole Flowing Pressure (psi)",
+                          hovermode="x unified", template="plotly_white")
+        st.plotly_chart(fig, use_container_width=True)
 
 # --- TAB 2: WELLBORE SCHEMATIC ---
 with tab2:
     st.subheader("Dynamic Wellbore Schematic")
     fig_sch = go.Figure()
     
-    # Sort casings by ID descending to draw outer (widest) first
     casings_sorted = sorted(casings, key=lambda x: x["id"], reverse=True)
-    
-    # Draw Open Hole (Background below casing)
     max_casing_id = casings_sorted[0]["id"] if casings_sorted else tbg_od + 4
-    fig_sch.add_shape(type="rect", x0=-max_casing_id/2, y0=0, x1=max_casing_id/2, y1=md_total,
+    
+    # Earth / Open Hole
+    fig_sch.add_shape(type="rect", x0=-max_casing_id/2 - 2, y0=0, x1=max_casing_id/2 + 2, y1=md_total,
                       line=dict(color="brown", width=1), fillcolor="#F4A460", layer="below")
     
     # Draw Casings
@@ -246,27 +246,57 @@ with tab2:
     fig_sch.add_shape(type="rect", x0=-tbg_id/2, y0=0, x1=tbg_id/2, y1=tbg_depth,
                       line=dict(color="darkblue", width=1), fillcolor="white")
                       
+    # Find nearest casing for packer & annulus calculations
+    valid_casings = [c for c in casings if c["depth"] >= tbg_depth]
+    closest_outer_id = min(valid_casings, key=lambda x: x["id"])["id"] if valid_casings else max_casing_id
+    
     # Draw Packer
     if has_packer and tbg_depth > 0:
-        valid_casings = [c for c in casings if c["depth"] >= tbg_depth]
-        pack_id = min(valid_casings, key=lambda x: x["id"])["id"] if valid_casings else max_casing_id
         pack_thick = md_total * 0.015 
-        
-        # Left packer element
-        fig_sch.add_shape(type="rect", x0=-pack_id/2, y0=tbg_depth-pack_thick, x1=-tbg_od/2, y1=tbg_depth,
+        fig_sch.add_shape(type="rect", x0=-closest_outer_id/2, y0=tbg_depth-pack_thick, x1=-tbg_od/2, y1=tbg_depth,
                           line=dict(color="black", width=1), fillcolor="#333333")
-        # Right packer element
-        fig_sch.add_shape(type="rect", x0=tbg_od/2, y0=tbg_depth-pack_thick, x1=pack_id/2, y1=tbg_depth,
+        fig_sch.add_shape(type="rect", x0=tbg_od/2, y0=tbg_depth-pack_thick, x1=closest_outer_id/2, y1=tbg_depth,
                           line=dict(color="black", width=1), fillcolor="#333333")
                           
     # Draw Perforations
     fig_sch.add_shape(type="rect", x0=-max_casing_id/2 - 1, y0=perf_top, x1=max_casing_id/2 + 1, y1=perf_bot,
                       line=dict(color="red", width=2), fillcolor="rgba(255,0,0,0.5)")
+
+    # ==========================
+    # FLOW ARROWS (ANNOTATIONS)
+    # ==========================
+    mid_perf = (perf_top + perf_bot) / 2
     
-    # STRICTLY FIX AXIS DIRECTION
+    # 1. Formation to Wellbore (Left & Right)
+    fig_sch.add_annotation(x=-closest_outer_id/2 + 0.5, y=mid_perf, ax=-max_casing_id/2 - 2, ay=mid_perf,
+                           axref='x', ayref='y', showarrow=True, arrowhead=2, arrowcolor="darkgreen", arrowwidth=3)
+    fig_sch.add_annotation(x=closest_outer_id/2 - 0.5, y=mid_perf, ax=max_casing_id/2 + 2, ay=mid_perf,
+                           axref='x', ayref='y', showarrow=True, arrowhead=2, arrowcolor="darkgreen", arrowwidth=3)
+
+    # 2. Upward Flow Logic
+    arrow_tail_y = tbg_depth + (md_total * 0.05)  # Slightly below tubing
+    arrow_head_y = tbg_depth - (md_total * 0.05)  # Slightly above tubing shoe
+    
+    # Tubing Flow (Always happens)
+    fig_sch.add_annotation(x=0, y=arrow_head_y, ax=0, ay=arrow_tail_y,
+                           axref='x', ayref='y', showarrow=True, arrowhead=3, arrowcolor="green", arrowwidth=4)
+
+    if not has_packer:
+        # Annulus Flow (Left & Right)
+        mid_annulus = (tbg_od/2 + closest_outer_id/2) / 2
+        fig_sch.add_annotation(x=-mid_annulus, y=arrow_head_y, ax=-mid_annulus, ay=arrow_tail_y,
+                               axref='x', ayref='y', showarrow=True, arrowhead=3, arrowcolor="orange", arrowwidth=3)
+        fig_sch.add_annotation(x=mid_annulus, y=arrow_head_y, ax=mid_annulus, ay=arrow_tail_y,
+                               axref='x', ayref='y', showarrow=True, arrowhead=3, arrowcolor="orange", arrowwidth=3)
+                               
+        # Annulus Fluid Text Label
+        fig_sch.add_annotation(x=0, y=tbg_depth - (md_total * 0.15), text="<b>Produced fluid in annulus</b>",
+                               showarrow=False, font=dict(color="darkorange", size=14), 
+                               bgcolor="rgba(255,255,255,0.9)", bordercolor="orange", borderwidth=2)
+    
     fig_sch.update_layout(xaxis_title="Diameter (in)", yaxis_title="Depth (ft)",
                           yaxis=dict(range=[md_total, 0]), showlegend=False,
-                          template="plotly_white", width=400, height=700)
+                          template="plotly_white", width=450, height=750)
     
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -275,18 +305,23 @@ with tab2:
         st.markdown("""
         ### Schematic Details
         * **Brown Zone:** Earth / Open Hole
-        * **Outer Light Grey Layers:** Casings (up to 4, dynamically stacked)
-        * **Inner Light Blue:** Tubing OD/ID Annulus
-        * **Dark Grey Blocks:** Packer (dynamically seals against nearest outer casing)
+        * **Outer Light Grey Layers:** Casings (up to 4)
+        * **Inner Light Blue:** Tubing Annulus
+        * **Dark Grey Blocks:** Packer 
         * **Red Zone:** Perforated Interval
         
-        *The wellbore correctly scales downward, with 0 ft at the top.*
+        **Flow Indicators:**
+        * **Dark Green Arrows:** Hydrocarbon flow from the reservoir into the wellbore.
+        * **Bright Green Arrows:** Flow traveling up the production tubing.
+        * **Orange Arrows (If no packer):** Flow migrating upward into the casing-tubing annulus.
         """)
 
 # --- TAB 3: PROFILE & FLOW ASSURANCE ---
 with tab3:
     st.subheader("Pressure/Temperature Gradients & Flow Assurance")
-    if q_op:
+    if not has_packer:
+        st.warning("⚠️ **Calculations Disabled:** Packer is unset. Set the packer to compute Flow Assurance profiling.")
+    elif q_op:
         depths = np.linspace(0, md_total, 50)
         p_prof, t_prof, v_prof, v_erosional, t_hyd = [], [], [], [], []
         
@@ -332,33 +367,36 @@ with tab3:
         else:
             st.success("✅ Flow velocities are within safe erosional limits.")
     else:
-        st.warning("Establish an operating point in Nodal Analysis to view profiles.")
+        st.info("Establish an operating point in Nodal Analysis to view profiles.")
 
 # --- TAB 4: SENSITIVITY ANALYSIS ---
 with tab4:
     st.subheader("Batch Sensitivity Analysis")
-    sens_param = st.selectbox("Select Parameter to Vary", ["Tubing ID (in)", "Water Cut (%)", "Wellhead Pressure (psi)"])
-    
-    if sens_param == "Tubing ID (in)":
-        sens_vals = [2.441, 2.992, 3.958]
-    elif sens_param == "Water Cut (%)":
-        sens_vals = [0, 50, 90]
+    if not has_packer:
+        st.warning("⚠️ **Calculations Disabled:** Packer is unset. Set the packer to run Sensitivity Analysis.")
     else:
-        sens_vals = [250, 500, 1000]
+        sens_param = st.selectbox("Select Parameter to Vary", ["Tubing ID (in)", "Water Cut (%)", "Wellhead Pressure (psi)"])
         
-    fig_sens = go.Figure()
-    fig_sens.add_trace(go.Scatter(x=q_ipr, y=p_ipr, mode='lines', name='Base IPR', line=dict(color='blue', width=3)))
-    
-    for val in sens_vals:
         if sens_param == "Tubing ID (in)":
-            p_vlp_sens = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, val, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
+            sens_vals = [2.441, 2.992, 3.958]
         elif sens_param == "Water Cut (%)":
-            p_vlp_sens = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, val, gor, q_vlp)
+            sens_vals = [0, 50, 90]
         else:
-            p_vlp_sens = calculate_vlp_curve(val, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
+            sens_vals = [250, 500, 1000]
             
-        fig_sens.add_trace(go.Scatter(x=q_vlp, y=p_vlp_sens, mode='lines', name=f'VLP: {val}', line=dict(dash='dash')))
+        fig_sens = go.Figure()
+        fig_sens.add_trace(go.Scatter(x=q_ipr, y=p_ipr, mode='lines', name='Base IPR', line=dict(color='blue', width=3)))
         
-    fig_sens.update_layout(xaxis_title="Flow Rate (STB/d)", yaxis_title="Bottomhole Flowing Pressure (psi)",
-                           hovermode="x unified", template="plotly_white")
-    st.plotly_chart(fig_sens, use_container_width=True)
+        for val in sens_vals:
+            if sens_param == "Tubing ID (in)":
+                p_vlp_sens = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, val, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
+            elif sens_param == "Water Cut (%)":
+                p_vlp_sens = calculate_vlp_curve(p_wh, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, val, gor, q_vlp)
+            else:
+                p_vlp_sens = calculate_vlp_curve(val, t_wh, t_res, md_total, tbg_id, tbg_depth, casings, api, sg_g, wc, gor, q_vlp)
+                
+            fig_sens.add_trace(go.Scatter(x=q_vlp, y=p_vlp_sens, mode='lines', name=f'VLP: {val}', line=dict(dash='dash')))
+            
+        fig_sens.update_layout(xaxis_title="Flow Rate (STB/d)", yaxis_title="Bottomhole Flowing Pressure (psi)",
+                               hovermode="x unified", template="plotly_white")
+        st.plotly_chart(fig_sens, use_container_width=True)
